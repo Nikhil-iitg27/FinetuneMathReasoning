@@ -1,6 +1,6 @@
 # FinetuneMathReasoning
 
-A scalable RLHF/GRPO finetuning framework for math reasoning using the Qwen2.5-1.5B model on the GSM8k dataset, with custom reward functions and robust training/evaluation utilities.
+A scalable RLHF/GRPO finetuning framework for math reasoning using the Qwen2.5-0.5B-Instruct model on the GSM8k dataset, with custom reward functions and robust training/evaluation utilities.
 
 ---
 
