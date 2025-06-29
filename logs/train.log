@@ -1,0 +1,61 @@
+2025-06-29 15:31:41,678 INFO Loading tokenizer and model...
+2025-06-29 15:31:55,753 INFO Preparing dataloaders...
+2025-06-29 15:32:20,580 INFO Epoch 1/3 started.
+2025-06-29 15:36:54,024 INFO Loading tokenizer and model...
+2025-06-29 15:37:01,896 INFO Preparing dataloaders...
+2025-06-29 15:37:19,794 INFO Epoch 1/3 started.
+2025-06-29 15:46:06,374 INFO Loading tokenizer and model...
+2025-06-29 15:46:19,158 INFO Preparing dataloaders...
+2025-06-29 15:46:32,742 INFO Epoch 1/3 started.
+2025-06-29 15:46:46,175 INFO Step 10 | Loss: 1.0628 | Mean Reward: 1.0075
+2025-06-29 15:46:59,965 INFO Step 20 | Loss: 0.9595 | Mean Reward: 1.0075
+2025-06-29 15:47:15,282 INFO Step 30 | Loss: 0.7151 | Mean Reward: 1.0075
+2025-06-29 15:47:29,208 INFO Step 40 | Loss: 0.7698 | Mean Reward: 1.0075
+2025-06-29 15:47:44,657 INFO Step 50 | Loss: 0.7513 | Mean Reward: 1.0075
+2025-06-29 15:47:58,717 INFO Step 60 | Loss: 0.9130 | Mean Reward: 1.0075
+2025-06-29 15:48:14,696 INFO Step 70 | Loss: 0.5356 | Mean Reward: 1.0075
+2025-06-29 15:48:28,586 INFO Step 80 | Loss: 0.4104 | Mean Reward: 1.0075
+2025-06-29 15:48:43,835 INFO Step 90 | Loss: 0.7652 | Mean Reward: 1.0075
+2025-06-29 15:48:57,713 INFO Step 100 | Loss: 0.4228 | Mean Reward: 1.0075
+2025-06-29 15:49:11,384 INFO Step 110 | Loss: 0.9233 | Mean Reward: 1.0075
+2025-06-29 15:49:26,611 INFO Step 120 | Loss: 0.5030 | Mean Reward: 1.0075
+2025-06-29 15:49:41,188 INFO Step 130 | Loss: 0.7641 | Mean Reward: 1.0075
+2025-06-29 15:49:56,728 INFO Step 140 | Loss: 0.7531 | Mean Reward: 1.0075
+2025-06-29 15:50:10,445 INFO Step 150 | Loss: 0.6554 | Mean Reward: 1.0075
+2025-06-29 15:50:24,565 INFO Step 160 | Loss: 0.3908 | Mean Reward: 1.0075
+2025-06-29 15:50:38,250 INFO Step 170 | Loss: 0.5426 | Mean Reward: 1.0075
+2025-06-29 15:50:52,114 INFO Step 180 | Loss: 0.5140 | Mean Reward: 1.0075
+2025-06-29 15:51:07,597 INFO Step 190 | Loss: 0.7161 | Mean Reward: 1.0075
+2025-06-29 15:51:21,583 INFO Step 200 | Loss: 0.4785 | Mean Reward: 1.0075
+2025-06-29 15:51:35,353 INFO Step 210 | Loss: 0.8129 | Mean Reward: 1.0075
+2025-06-29 15:51:49,122 INFO Step 220 | Loss: 0.8528 | Mean Reward: 1.0075
+2025-06-29 15:52:02,851 INFO Step 230 | Loss: 0.5634 | Mean Reward: 1.0075
+2025-06-29 15:52:16,828 INFO Step 240 | Loss: 0.4773 | Mean Reward: 1.0075
+2025-06-29 15:52:32,129 INFO Step 250 | Loss: 0.3561 | Mean Reward: 1.0075
+2025-06-29 15:52:47,429 INFO Step 260 | Loss: 0.7389 | Mean Reward: 1.0075
+2025-06-29 15:53:02,879 INFO Step 270 | Loss: 0.6247 | Mean Reward: 1.0075
+2025-06-29 15:53:17,969 INFO Step 280 | Loss: 0.4507 | Mean Reward: 1.0075
+2025-06-29 15:53:31,708 INFO Step 290 | Loss: 0.8646 | Mean Reward: 1.0075
+2025-06-29 15:53:47,113 INFO Step 300 | Loss: 0.8259 | Mean Reward: 1.0075
+2025-06-29 15:54:00,873 INFO Step 310 | Loss: 0.2967 | Mean Reward: 1.0075
+2025-06-29 15:54:14,471 INFO Step 320 | Loss: 0.3370 | Mean Reward: 1.0075
+2025-06-29 15:54:28,208 INFO Step 330 | Loss: 0.5244 | Mean Reward: 1.0075
+2025-06-29 15:54:41,747 INFO Step 340 | Loss: 0.4803 | Mean Reward: 1.0075
+2025-06-29 15:54:55,377 INFO Step 350 | Loss: 0.5257 | Mean Reward: 1.0075
+2025-06-29 15:55:09,014 INFO Step 360 | Loss: 0.4147 | Mean Reward: 1.0075
+2025-06-29 15:55:22,734 INFO Step 370 | Loss: 0.3649 | Mean Reward: 1.0075
+2025-06-29 15:55:36,667 INFO Step 380 | Loss: 0.4140 | Mean Reward: 1.0075
+2025-06-29 15:55:50,352 INFO Step 390 | Loss: 0.5143 | Mean Reward: 1.0075
+2025-06-29 15:56:04,282 INFO Step 400 | Loss: 0.7348 | Mean Reward: 1.0075
+2025-06-29 15:56:18,306 INFO Step 410 | Loss: 0.6327 | Mean Reward: 1.0075
+2025-06-29 15:56:32,249 INFO Step 420 | Loss: 0.8128 | Mean Reward: 1.0075
+2025-06-29 15:56:46,314 INFO Step 430 | Loss: 0.2870 | Mean Reward: 1.0075
+2025-06-29 15:57:01,922 INFO Step 440 | Loss: 0.6025 | Mean Reward: 1.0075
+2025-06-29 15:57:15,959 INFO Step 450 | Loss: 0.3002 | Mean Reward: 1.0075
+2025-06-29 15:57:29,949 INFO Step 460 | Loss: 0.5787 | Mean Reward: 1.0075
+2025-06-29 15:57:44,262 INFO Step 470 | Loss: 0.4536 | Mean Reward: 1.0075
+2025-06-29 15:57:59,530 INFO Step 480 | Loss: 0.5701 | Mean Reward: 1.0075
+2025-06-29 15:58:13,668 INFO Step 490 | Loss: 0.4156 | Mean Reward: 1.0075
+2025-06-29 15:58:28,816 INFO Step 500 | Loss: 0.6139 | Mean Reward: 1.0075
+2025-06-29 15:58:41,040 INFO Checkpoint saved at checkpoints/model_step500.pt
+2025-06-29 15:58:55,145 INFO Step 510 | Loss: 0.4373 | Mean Reward: 1.0075
