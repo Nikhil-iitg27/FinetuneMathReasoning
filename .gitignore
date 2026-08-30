@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+
+docs
+.venv
+checkpoints/
+logs/
+data/

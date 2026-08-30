@@ -1,120 +1,199 @@
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
+
 import torch
 from torch.optim import AdamW
-from typing import Callable, Dict, Any, List
 
+from src.rewards import extract_answer
+
+
+@dataclass
 class GRPOConfig:
-    def __init__(
-        self,
-        learning_rate: float = 1e-5,
-        gamma: float = 0.99,
-        grad_clip: float = 1.0,
-        reward_functions: List[Callable] = None,
-        reward_weights: List[float] = None,
-        max_grad_norm: float = 1.0,
-        device: str = "cpu"
-    ):
-        self.learning_rate = learning_rate
-        self.gamma = gamma
-        self.grad_clip = grad_clip
-        self.reward_functions = reward_functions or []
-        self.reward_weights = reward_weights or [1.0] * len(self.reward_functions)
-        self.max_grad_norm = max_grad_norm
-        self.device = device
+    learning_rate: float = 1e-5
+    group_size: int = 8
+    max_new_tokens: int = 256
+    temperature: float = 0.8
+    max_grad_norm: float = 1.0
+    reward_functions: List[Callable] = field(default_factory=list)
+    reward_weights: List[float] = field(default_factory=list)
+    device: str = "cuda"
+    is_peft: bool = False
+
+    def __post_init__(self):
+        if not self.reward_weights:
+            self.reward_weights = [1.0] * len(self.reward_functions)
+
 
 class GRPOTrainer:
-    def __init__(
-        self,
-        model,
-        tokenizer,
-        config: GRPOConfig,
-        optimizer=None
-    ):
+    """From-scratch Dr. GRPO: group-relative, mean-centered advantage, no length
+    normalization, no KL/reference model (Dr. GRPO drops all three vs. GRPO)."""
+
+    def __init__(self, model, tokenizer, config: GRPOConfig, optimizer=None):
+        assert tokenizer.padding_side == "left", (
+            "GRPOTrainer requires left-padding: batched generation and the fixed "
+            "prompt/completion boundary both depend on it."
+        )
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
-        self.optimizer = optimizer or AdamW(self.model.parameters(), lr=config.learning_rate)
+        trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+        self.optimizer = optimizer or AdamW(trainable_params, lr=config.learning_rate)
 
-    def compute_rewards(self, model_outputs: List[str], ground_truths: List[Any]) -> torch.Tensor:
-        """
-        Computes weighted sum of rewards for each sample.
-        """
-        rewards = []
-        for output, gt in zip(model_outputs, ground_truths):
-            reward_vals = []
-            for i, func in enumerate(self.config.reward_functions):
-                # If reward function expects ground truth, pass it
-                if func.__code__.co_argcount == 2:
-                    reward = func(output, gt)
-                else:
-                    reward = func(output)
-                print(f"Reward {func.__name__}: {reward}") #Debug Logging"
-                reward_vals.append(reward * self.config.reward_weights[i])
-            rewards.append(sum(reward_vals))
-        return torch.tensor(rewards, dtype=torch.float32, device=self.config.device)
+    def generate_rollouts(self, input_ids, attention_mask):
+        """The only place training-time generation happens. Sampling is hard-coded on
+        (do_sample=True) — never parameterized to greedy — because greedy decoding would
+        make all `group_size` completions per prompt near-identical, collapsing every
+        group's reward variance to ~0 and silently killing the entire Dr. GRPO signal."""
+        self.model.eval()
+        prompt_length = input_ids.shape[1]
+        with torch.no_grad():
+            sequences = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.config.max_new_tokens,
+                do_sample=True,
+                temperature=self.config.temperature,
+                num_return_sequences=self.config.group_size,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        return sequences, prompt_length
 
-    def train_step(self, batch: Dict[str, Any]):
-        """
-        Performs a single GRPO training step.
-        batch: dict with keys 'input_ids', 'attention_mask', 'labels', 'ground_truth_answer'
-        """
-        self.model.train()
-        input_ids = batch['input_ids'].to(self.config.device)
-        attention_mask = batch['attention_mask'].to(self.config.device)
-        labels = batch['labels'].to(self.config.device)
-        ground_truths = batch['ground_truth_answer']
-
-        # Forward pass
-        outputs = self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=128,
-            do_sample=True
+    def compute_rewards(self, completions, ground_truths):
+        num_samples = len(completions)
+        breakdown = {}
+        weighted_total = torch.zeros(num_samples, dtype=torch.float32)
+        for func, weight in zip(self.config.reward_functions, self.config.reward_weights):
+            values = torch.tensor(
+                [func(completion, gt) for completion, gt in zip(completions, ground_truths)],
+                dtype=torch.float32,
+            )
+            breakdown[func.__name__] = values
+            weighted_total += weight * values
+        extraction_failed = torch.tensor(
+            [extract_answer(c) is None for c in completions], dtype=torch.bool
         )
-        decoded_outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        return weighted_total.to(self.config.device), breakdown, extraction_failed
 
-        # Compute rewards
-        rewards = self.compute_rewards(decoded_outputs, ground_truths)
+    def compute_advantages(self, rewards):
+        """Dr. GRPO: mean-centered only, no /std(r)."""
+        group_size = self.config.group_size
+        num_prompts = rewards.shape[0] // group_size
+        grouped = rewards.view(num_prompts, group_size)
+        advantages = grouped - grouped.mean(dim=1, keepdim=True)
+        zero_variance_fraction = (grouped.std(dim=1) == 0).float().mean().item()
+        return advantages.reshape(-1), zero_variance_fraction
 
-        # Compute log probs of generated outputs
-        log_probs = self._compute_log_probs(input_ids, outputs)
+    def _first_eos_positions(self, token_ids_2d):
+        """Per row: index of the first EOS token, or the last column index if none appears."""
+        eos_id = self.tokenizer.eos_token_id
+        is_eos = token_ids_2d == eos_id
+        has_eos = is_eos.any(dim=1)
+        num_cols = token_ids_2d.shape[1]
+        return torch.where(
+            has_eos,
+            is_eos.float().argmax(dim=1),
+            torch.full((token_ids_2d.shape[0],), num_cols - 1, dtype=torch.long, device=token_ids_2d.device),
+        )
 
-        # Compute loss (negative expected reward-weighted log probs)
-        loss = -torch.mean(log_probs * rewards)
+    def _completion_mask(self, targets, prompt_length):
+        """True for completion tokens up to and including each row's first EOS; False for
+        prompt tokens and anything after EOS. Uses position + first-EOS, not a raw
+        `token != pad_token_id` check, since some tokenizers set pad_token == eos_token,
+        which would otherwise zero out the legitimate EOS token from every row's loss."""
+        completion_targets = targets[:, prompt_length - 1:]
+        first_eos_idx = self._first_eos_positions(completion_targets)
+        positions = torch.arange(completion_targets.shape[1], device=targets.device).unsqueeze(0)
+        local_mask = positions <= first_eos_idx.unsqueeze(1)
+        full_mask = torch.zeros_like(targets, dtype=torch.bool)
+        full_mask[:, prompt_length - 1:] = local_mask
+        return full_mask
+
+    def _completion_lengths(self, sequences, prompt_length):
+        completion_ids = sequences[:, prompt_length:]
+        return self._first_eos_positions(completion_ids) + 1
+
+    def compute_policy_loss(self, sequences, prompt_length, advantages) -> Optional[torch.Tensor]:
+        self.model.train()
+        inputs = sequences[:, :-1]
+        targets = sequences[:, 1:]
+
+        logits = self.model(input_ids=inputs).logits
+        if not torch.isfinite(logits).all():
+            return None
+        log_probs = torch.log_softmax(logits, dim=-1)
+        token_log_probs = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
+
+        completion_mask = self._completion_mask(targets, prompt_length)
+        # Sum over completion tokens only (no /|o_i| length normalization — Dr. GRPO).
+        per_sample_log_prob = (token_log_probs * completion_mask).sum(dim=1)
+        loss = -(advantages.detach() * per_sample_log_prob).mean()
+        return loss if torch.isfinite(loss) else None
+
+    def _metrics(self, loss_value, rewards, reward_breakdown, extraction_failed,
+                 zero_variance_fraction, sequences, prompt_length):
+        completion_lengths = self._completion_lengths(sequences, prompt_length).float()
+        metrics = {
+            "loss": loss_value,
+            "mean_reward": rewards.mean().item(),
+            "extraction_failure_rate": extraction_failed.float().mean().item(),
+            "zero_variance_fraction": zero_variance_fraction,
+            "mean_completion_length": completion_lengths.mean().item(),
+            "std_completion_length": completion_lengths.std().item() if completion_lengths.numel() > 1 else 0.0,
+        }
+        for name, values in reward_breakdown.items():
+            metrics[f"mean_{name}"] = values.mean().item()
+        if torch.cuda.is_available():
+            metrics["peak_vram_mb"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        return metrics
+
+    def train_step(self, batch):
+        input_ids = batch["input_ids"].to(self.config.device)
+        attention_mask = batch["attention_mask"].to(self.config.device)
+        ground_truths = batch["ground_truth_answer"]
+
+        sequences, prompt_length = self.generate_rollouts(input_ids, attention_mask)
+        completions = self.tokenizer.batch_decode(sequences[:, prompt_length:], skip_special_tokens=True)
+
+        group_size = self.config.group_size
+        repeated_ground_truths = [gt for gt in ground_truths for _ in range(group_size)]
+
+        rewards, reward_breakdown, extraction_failed = self.compute_rewards(completions, repeated_ground_truths)
+        advantages, zero_variance_fraction = self.compute_advantages(rewards)
+        loss = self.compute_policy_loss(sequences, prompt_length, advantages)
+
+        if loss is None:
+            logging.warning("Skipping optimizer step: non-finite loss/logits detected this step.")
+            return self._metrics(None, rewards, reward_breakdown, extraction_failed,
+                                  zero_variance_fraction, sequences, prompt_length)
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(
+            (p for p in self.model.parameters() if p.requires_grad), self.config.max_grad_norm
+        )
         self.optimizer.step()
 
-        return {"loss": loss.item(), "mean_reward": rewards.mean().item()}
-
-    def _compute_log_probs(self, input_ids, generated_ids):
-        """
-        Computes log probabilities of generated sequences.
-        """
-        # Shift generated_ids for causal LM
-        labels = generated_ids[:, 1:].contiguous()
-        inputs = generated_ids[:, :-1].contiguous()
-        outputs = self.model(input_ids=inputs)
-        logits = outputs.logits
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-        # Gather log probs of the actual generated tokens
-        log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
-        # Mask padding
-        mask = (labels != self.tokenizer.pad_token_id)
-        log_probs = (log_probs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        return log_probs
+        return self._metrics(loss.item(), rewards, reward_breakdown, extraction_failed,
+                              zero_variance_fraction, sequences, prompt_length)
 
     def save(self, path: str):
-        torch.save({
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "config": self.config.__dict__
-        }, path)
+        os.makedirs(path, exist_ok=True)
+        if self.config.is_peft:
+            self.model.save_pretrained(path)
+        else:
+            torch.save(self.model.state_dict(), os.path.join(path, "model.pt"))
+        torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
 
     def load(self, path: str):
-        checkpoint = torch.load(path, map_location=self.config.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        for k, v in checkpoint["config"].items():
-            setattr(self.config, k, v)
+        if self.config.is_peft:
+            raise NotImplementedError(
+                "Loading a PEFT checkpoint requires re-wrapping a freshly loaded base model "
+                "via PeftModel.from_pretrained(base_model, path) at construction time, not "
+                "loading into an existing GRPOTrainer instance."
+            )
+        self.model.load_state_dict(torch.load(os.path.join(path, "model.pt"), map_location=self.config.device))
+        optimizer_path = os.path.join(path, "optimizer.pt")
+        if os.path.exists(optimizer_path):
+            self.optimizer.load_state_dict(torch.load(optimizer_path, map_location=self.config.device))

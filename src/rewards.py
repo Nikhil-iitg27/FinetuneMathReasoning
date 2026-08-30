@@ -1,64 +1,46 @@
 import re
 
-def extract_field(text, tag):
-    """Extracts content from <tag>...</tag> in text."""
-    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-    return match.group(1).strip() if match else None
+# Anchored with fullmatch (not search) so trailing/leading junk outside the tags fails the
+# format check rather than being silently ignored. Content groups use [^<]* rather than a
+# non-greedy .*? — under fullmatch, .*? still backtracks and will happily swallow a second,
+# duplicate tag pair (e.g. "...</answer><answer>5</answer>") to find a way to match the full
+# string. Excluding '<' from the content entirely closes that off structurally.
+_FORMAT_RE = re.compile(
+    r"\s*<reasoning>([^<]*)</reasoning>\s*<answer>([^<]*)</answer>\s*", re.DOTALL
+)
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
-import re
 
-def formatting_reward(model_output):
-    """
-    Reward for correct XML-like formatting AND non-trivial content.
-    Returns 1.0 if all fields are present AND each field contains more than 5 letters OR more than 2 digits, else 0.0.
-    """
-    def has_content(s):
-        if not s:
-            return False
-        letters = len(re.findall(r'[a-zA-Z]', s))
-        digits = len(re.findall(r'\d', s))
-        return letters > 5 or digits > 2
+def extract_answer(completion):
+    """Returns the <answer> content, or None if the completion isn't well-formed."""
+    if not completion:
+        return None
+    match = _FORMAT_RE.fullmatch(completion)
+    return match.group(2).strip() if match else None
 
-    fields = ['reasoning', 'output', 'answer']
-    for field in fields:
-        content = extract_field(model_output, field)
-        if content is None or not has_content(content):
-            return 0.0
-    return 1.0
 
-def reasoning_reward(model_output):
-    """
-    Reward for presence and length of reasoning.
-    Returns a value between 0 and 1 based on length (normalized).
-    """
-    reasoning = extract_field(model_output, 'reasoning')
-    if not reasoning:
+def _to_float(value):
+    if value is None:
+        return None
+    cleaned = str(value).strip().replace(",", "").replace("$", "")
+    match = _NUM_RE.search(cleaned)
+    if not match:
+        return None
+    try:
+        return float(match.group())
+    except ValueError:
+        return None
+
+
+def format_reward(completion, ground_truth=None):
+    """1.0 if completion is exactly one <reasoning>...</reasoning><answer>...</answer>, else 0.0."""
+    return 1.0 if _FORMAT_RE.fullmatch(completion or "") else 0.0
+
+
+def accuracy_reward(completion, ground_truth):
+    """1.0 if the extracted answer is numerically equal (tolerance 1e-4) to ground_truth, else 0.0."""
+    predicted = _to_float(extract_answer(completion))
+    truth = _to_float(ground_truth)
+    if predicted is None or truth is None:
         return 0.0
-    # Normalize by a reasonable max length (e.g., 200 chars)
-    return min(len(reasoning) / 200, 1.0)
-
-def output_consistency_reward(model_output):
-    """
-    Reward for output consistency: output should reference reasoning.
-    Returns 1.0 if output overlaps with reasoning, else 0.0.
-    """
-    reasoning = extract_field(model_output, 'reasoning')
-    output = extract_field(model_output, 'output')
-    if not reasoning or not output:
-        return 0.0
-    # Simple overlap check: at least 3 words in common
-    reasoning_words = set(reasoning.lower().split())
-    output_words = set(output.lower().split())
-    overlap = reasoning_words & output_words
-    return 1.0 if len(overlap) >= 3 else 0.0
-
-def answer_accuracy_reward(model_output, ground_truth_answer):
-    """
-    Reward for correct answer.
-    Returns 1.0 if answer matches ground truth, else 0.0.
-    """
-    answer = extract_field(model_output, 'answer')
-    if not answer:
-        return 0.0
-    # Normalize and compare
-    return 1.0 if answer.strip().lower() == str(ground_truth_answer).strip().lower() else 0.0
+    return 1.0 if abs(predicted - truth) < 1e-4 else 0.0

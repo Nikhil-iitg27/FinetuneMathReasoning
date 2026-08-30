@@ -1,44 +1,73 @@
+import argparse
 import os
-import torch
-import random
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from src.data import get_gsm8k_dataloader
-from src.rewards import formatting_reward, answer_accuracy_reward
 
-def load_model_and_tokenizer(model_name, checkpoint_path, device):
+import torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from src.data import GSM8kPromptDataset, build_prompt_text, build_split_indices, get_gsm8k_dataloader, load_pooled_gsm8k
+from src.rewards import accuracy_reward, format_reward
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model_name", required=True)
+    p.add_argument("--checkpoint_dir", required=True)
+    p.add_argument("--adaptation", choices=["full", "lora"], required=True)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--num_samples", type=int, default=5)
+    return p.parse_args()
+
+
+def load_model_and_tokenizer(model_name, checkpoint_dir, adaptation, device):
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(device)
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
+    ).to(device)
+
+    if adaptation == "lora":
+        model = PeftModel.from_pretrained(model, checkpoint_dir)
+    else:
+        state_dict_path = os.path.join(checkpoint_dir, "model.pt")
+        if os.path.exists(state_dict_path):
+            model.load_state_dict(torch.load(state_dict_path, map_location=device))
     model.eval()
     return model, tokenizer
 
-def evaluate_random_samples(model, tokenizer, device, num_samples=5):
-    test_loader = get_gsm8k_dataloader("test", tokenizer, batch_size=1, shuffle=True)
-    print("\nEvaluating random samples from GSM8k test split:\n")
-    for i, batch in enumerate(test_loader):
-        if i >= num_samples:
-            break
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        ground_truth = batch['ground_truth_answer'][0]
-        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+
+def evaluate_random_samples(model, tokenizer, device, seed, num_samples=5):
+    pooled = load_pooled_gsm8k()
+    splits = build_split_indices(len(pooled), seed=seed)
+    dataset = GSM8kPromptDataset(pooled, splits["test"][:num_samples], tokenizer)
+    loader = get_gsm8k_dataloader(dataset, batch_size=1, shuffle=False, drop_last=False)
+
+    print("\nEvaluating random samples from the held-out test split:\n")
+    for batch in loader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        ground_truth = batch["ground_truth_answer"][0]
+        prompt_length = input_ids.shape[1]
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=128,
-                do_sample=False
+                max_new_tokens=256,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
             )
-        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        fmt_reward = formatting_reward(decoded)
-        acc_reward = answer_accuracy_reward(decoded, ground_truth)
-        print(f"Q: {question.strip()}")
-        print(f"Model Output: {decoded.strip()}")
+        completion = tokenizer.decode(outputs[0, prompt_length:], skip_special_tokens=True)
+        fmt = format_reward(completion, ground_truth)
+        acc = accuracy_reward(completion, ground_truth)
+        print(f"Q: {batch['question_text'][0]}")
+        print(f"Model Output: {completion.strip()}")
         print(f"Ground Truth Answer: {ground_truth}")
-        print(f"Formatting Reward: {fmt_reward} | Answer Accuracy Reward: {acc_reward}")
+        print(f"Format Reward: {fmt} | Accuracy Reward: {acc}")
         print("-" * 60)
+
 
 def interactive_inference(model, tokenizer, device):
     print("\nEnter a math word problem (or type 'exit' to quit):")
@@ -46,35 +75,27 @@ def interactive_inference(model, tokenizer, device):
         user_input = input(">> ").strip()
         if user_input.lower() == "exit":
             break
-        enc = tokenizer(
-            user_input,
-            truncation=True,
-            max_length=512,
-            padding='max_length',
-            return_tensors='pt'
-        )
-        input_ids = enc['input_ids'].to(device)
-        attention_mask = enc['attention_mask'].to(device)
+        prompt_text = build_prompt_text(user_input, tokenizer)
+        enc = tokenizer(prompt_text, return_tensors="pt")
+        input_ids = enc["input_ids"].to(device)
+        attention_mask = enc["attention_mask"].to(device)
+        prompt_length = input_ids.shape[1]
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=128,
-                do_sample=False
+                max_new_tokens=256,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
             )
-        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        print(f"Model Output:\n{decoded.strip()}\n")
+        completion = tokenizer.decode(outputs[0, prompt_length:], skip_special_tokens=True)
+        print(f"Model Output:\n{completion.strip()}\n")
+
 
 if __name__ == "__main__":
+    args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
-    checkpoint_path = os.path.join("checkpoints", "model_final.pt")
-
     print("Loading model and tokenizer...")
-    model, tokenizer = load_model_and_tokenizer(model_name, checkpoint_path, device)
-
-    # Evaluate on random test samples
-    evaluate_random_samples(model, tokenizer, device, num_samples=5)
-
-    # Interactive inference
+    model, tokenizer = load_model_and_tokenizer(args.model_name, args.checkpoint_dir, args.adaptation, device)
+    evaluate_random_samples(model, tokenizer, device, args.seed, args.num_samples)
     interactive_inference(model, tokenizer, device)
