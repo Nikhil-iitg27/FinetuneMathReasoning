@@ -22,10 +22,8 @@ def run():
     group_size = 3
 
     with torch.no_grad():
-        # do_sample=False (true greedy) rejects num_return_sequences > 1 outside beam search
-        # in this transformers version. do_sample=True + top_k=1 goes through the sampling
-        # code path (which does support num_return_sequences > 1) while still being
-        # deterministic, since only the single highest-probability token is ever a candidate.
+        # top_k=1 makes sampling deterministic (only one candidate token per step) while
+        # keeping do_sample=True, which is required for num_return_sequences > 1 here.
         sequences = model.generate(
             input_ids=enc["input_ids"],
             attention_mask=enc["attention_mask"],

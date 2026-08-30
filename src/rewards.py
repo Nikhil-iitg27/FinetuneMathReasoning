@@ -1,10 +1,7 @@
 import re
 
-# Anchored with fullmatch (not search) so trailing/leading junk outside the tags fails the
-# format check rather than being silently ignored. Content groups use [^<]* rather than a
-# non-greedy .*? — under fullmatch, .*? still backtracks and will happily swallow a second,
-# duplicate tag pair (e.g. "...</answer><answer>5</answer>") to find a way to match the full
-# string. Excluding '<' from the content entirely closes that off structurally.
+# fullmatch rejects any text outside the tags; [^<]* keeps a duplicate tag pair from
+# being swallowed into the content on backtracking.
 _FORMAT_RE = re.compile(
     r"\s*<reasoning>([^<]*)</reasoning>\s*<answer>([^<]*)</answer>\s*", re.DOTALL
 )

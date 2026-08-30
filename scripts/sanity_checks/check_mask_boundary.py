@@ -33,17 +33,22 @@ def run():
         [9, 9, 9, 5, 6, 7, 8],    # no EOS anywhere
     ])
     targets = sequences[:, 1:]
-    mask = trainer._completion_mask(targets, prompt_length)
+    # completion_targets/mask are pre-sliced to the completion region, so the shape check
+    # below is what proves the prompt region can't leak in.
+    completion_targets, mask = trainer._completion_mask(targets, prompt_length)
 
-    expected_row0 = torch.tensor([False, False, True, True, False, False])
-    expected_row1 = torch.tensor([False, False, True, True, True, True])
+    expected_completion_targets = torch.tensor([[5, eos, 7, 7], [5, 6, 7, 8]])
+    expected_row0 = torch.tensor([True, True, False, False])
+    expected_row1 = torch.tensor([True, True, True, True])
 
+    if mask.shape[1] != targets.shape[1] - (prompt_length - 1):
+        failures.append(f"mask width {mask.shape[1]} is not completion-only (expected {targets.shape[1] - (prompt_length - 1)})")
+    if not torch.equal(completion_targets, expected_completion_targets):
+        failures.append(f"completion_targets mismatch: got {completion_targets.tolist()}, expected {expected_completion_targets.tolist()}")
     if not torch.equal(mask[0], expected_row0):
         failures.append(f"row0 mask mismatch: got {mask[0].tolist()}, expected {expected_row0.tolist()}")
     if not torch.equal(mask[1], expected_row1):
         failures.append(f"row1 mask mismatch: got {mask[1].tolist()}, expected {expected_row1.tolist()}")
-    if mask[:, :prompt_length - 1].any():
-        failures.append("prompt-region tokens leaked into the completion mask")
 
     # Padding-in-completion contamination: a short completion in the same batch as a long one
     # must not have its post-EOS padding counted.
@@ -51,7 +56,7 @@ def run():
         [9, 9, 9, 5, eos, 0, 0],   # "short" real completion, then padding (0) after EOS
         [9, 9, 9, 5, 6, 7, eos],   # "long" completion, EOS at the very end
     ])
-    mask2 = trainer._completion_mask(short_and_long[:, 1:], prompt_length)
+    _, mask2 = trainer._completion_mask(short_and_long[:, 1:], prompt_length)
     if mask2[0].sum().item() != 2:
         failures.append(f"short-completion row should include exactly 2 tokens (through EOS), got {mask2[0].sum().item()}")
     if mask2[1].sum().item() != 4:

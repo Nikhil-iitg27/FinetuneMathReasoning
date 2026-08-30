@@ -27,8 +27,8 @@ class GRPOConfig:
 
 
 class GRPOTrainer:
-    """From-scratch Dr. GRPO: group-relative, mean-centered advantage, no length
-    normalization, no KL/reference model (Dr. GRPO drops all three vs. GRPO)."""
+    """Group-relative Dr. GRPO: mean-centered advantage, no length normalization,
+    no KL/reference model."""
 
     def __init__(self, model, tokenizer, config: GRPOConfig, optimizer=None):
         assert tokenizer.padding_side == "left", (
@@ -42,10 +42,8 @@ class GRPOTrainer:
         self.optimizer = optimizer or AdamW(trainable_params, lr=config.learning_rate)
 
     def generate_rollouts(self, input_ids, attention_mask):
-        """The only place training-time generation happens. Sampling is hard-coded on
-        (do_sample=True) — never parameterized to greedy — because greedy decoding would
-        make all `group_size` completions per prompt near-identical, collapsing every
-        group's reward variance to ~0 and silently killing the entire Dr. GRPO signal."""
+        """Training-time generation only. Always samples: greedy would make every
+        completion in a group near-identical, collapsing reward variance to zero."""
         self.model.eval()
         prompt_length = input_ids.shape[1]
         with torch.no_grad():
@@ -98,17 +96,14 @@ class GRPOTrainer:
         )
 
     def _completion_mask(self, targets, prompt_length):
-        """True for completion tokens up to and including each row's first EOS; False for
-        prompt tokens and anything after EOS. Uses position + first-EOS, not a raw
-        `token != pad_token_id` check, since some tokenizers set pad_token == eos_token,
-        which would otherwise zero out the legitimate EOS token from every row's loss."""
+        """Returns (completion_targets, mask) sliced to the completion region only.
+        mask covers up to each row's first EOS. Uses position + first-EOS rather than
+        `token != pad_token_id`, since pad_token can equal eos_token for some tokenizers."""
         completion_targets = targets[:, prompt_length - 1:]
         first_eos_idx = self._first_eos_positions(completion_targets)
         positions = torch.arange(completion_targets.shape[1], device=targets.device).unsqueeze(0)
-        local_mask = positions <= first_eos_idx.unsqueeze(1)
-        full_mask = torch.zeros_like(targets, dtype=torch.bool)
-        full_mask[:, prompt_length - 1:] = local_mask
-        return full_mask
+        mask = positions <= first_eos_idx.unsqueeze(1)
+        return completion_targets, mask
 
     def _completion_lengths(self, sequences, prompt_length):
         completion_ids = sequences[:, prompt_length:]
@@ -118,14 +113,17 @@ class GRPOTrainer:
         self.model.train()
         inputs = sequences[:, :-1]
         targets = sequences[:, 1:]
+        completion_targets, completion_mask = self._completion_mask(targets, prompt_length)
 
-        logits = self.model(input_ids=inputs).logits
+        # The backbone attends over the full sequence (needed for causal attention), but
+        # the vocab-head projection only needs completion-region log-probs.
+        logits_to_keep = completion_targets.shape[1]
+        logits = self.model(input_ids=inputs, logits_to_keep=logits_to_keep).logits
         if not torch.isfinite(logits).all():
             return None
         log_probs = torch.log_softmax(logits, dim=-1)
-        token_log_probs = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
+        token_log_probs = log_probs.gather(2, completion_targets.unsqueeze(-1)).squeeze(-1)
 
-        completion_mask = self._completion_mask(targets, prompt_length)
         # Sum over completion tokens only (no /|o_i| length normalization — Dr. GRPO).
         per_sample_log_prob = (token_log_probs * completion_mask).sum(dim=1)
         loss = -(advantages.detach() * per_sample_log_prob).mean()
