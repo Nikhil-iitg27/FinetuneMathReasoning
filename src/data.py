@@ -2,6 +2,7 @@ import json
 import os
 import random
 
+import torch
 from datasets import concatenate_datasets, load_dataset
 from torch.utils.data import DataLoader, Dataset
 
@@ -116,7 +117,8 @@ class GSM8kPromptDataset(Dataset):
         }
 
 
-def get_gsm8k_dataloader(dataset, batch_size=4, shuffle=True, drop_last=True):
+def get_gsm8k_dataloader(dataset, batch_size=4, shuffle=True, drop_last=True, seed=None):
     """drop_last=True by default: a short final batch would break the (num_prompts,
     group_size) reshape in GRPOTrainer.compute_advantages."""
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last)
+    generator = torch.Generator().manual_seed(seed) if shuffle and seed is not None else None
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, generator=generator)

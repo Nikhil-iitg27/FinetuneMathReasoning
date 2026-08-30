@@ -98,6 +98,10 @@ def main():
     logger = setup_logging(args.run_name, args.log_dir)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     run_dir = os.path.join(args.checkpoint_dir, args.run_name)
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "run_config.json"), "w") as f:
@@ -141,7 +145,9 @@ def main():
 
     train_dataset = GSM8kPromptDataset(pooled, train_indices, tokenizer)
     val_dataset = GSM8kPromptDataset(pooled, val_indices, tokenizer)
-    train_loader = get_gsm8k_dataloader(train_dataset, batch_size=args.prompts_per_step, shuffle=True, drop_last=True)
+    train_loader = get_gsm8k_dataloader(
+        train_dataset, batch_size=args.prompts_per_step, shuffle=True, drop_last=True, seed=args.seed
+    )
     val_loader = get_gsm8k_dataloader(val_dataset, batch_size=args.prompts_per_step, shuffle=False, drop_last=False)
     train_iter = cycle(train_loader)
 
