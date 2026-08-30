@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -176,22 +177,24 @@ class GRPOTrainer:
         return self._metrics(loss.item(), rewards, reward_breakdown, extraction_failed,
                               zero_variance_fraction, sequences, prompt_length)
 
-    def save(self, path: str):
+    def save(self, path: str, step: int = None):
+        """Saves a complete, independently loadable checkpoint: safetensors weights
+        (adapter-only for PEFT, full model otherwise) plus tokenizer and optimizer state.
+        Model reloading (including re-wrapping a PEFT adapter) happens at construction
+        time in the caller, not here, since that has to happen before a GRPOTrainer
+        exists at all."""
         os.makedirs(path, exist_ok=True)
         if self.config.is_peft:
             self.model.save_pretrained(path)
         else:
-            torch.save(self.model.state_dict(), os.path.join(path, "model.pt"))
+            self.model.save_pretrained(path, safe_serialization=True)
+        self.tokenizer.save_pretrained(path)
         torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
+        if step is not None:
+            with open(os.path.join(path, "trainer_state.json"), "w") as f:
+                json.dump({"step": step}, f)
 
-    def load(self, path: str):
-        if self.config.is_peft:
-            raise NotImplementedError(
-                "Loading a PEFT checkpoint requires re-wrapping a freshly loaded base model "
-                "via PeftModel.from_pretrained(base_model, path) at construction time, not "
-                "loading into an existing GRPOTrainer instance."
-            )
-        self.model.load_state_dict(torch.load(os.path.join(path, "model.pt"), map_location=self.config.device))
+    def load_optimizer_state(self, path: str):
         optimizer_path = os.path.join(path, "optimizer.pt")
         if os.path.exists(optimizer_path):
             self.optimizer.load_state_dict(torch.load(optimizer_path, map_location=self.config.device))

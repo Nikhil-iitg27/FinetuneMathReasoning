@@ -4,7 +4,7 @@ import logging
 import os
 
 import torch
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.data import (
@@ -40,6 +40,7 @@ def parse_args():
     p.add_argument("--log_dir", default="logs")
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--grad_checkpointing", action="store_true")
+    p.add_argument("--resume_from", default=None)
     return p.parse_args()
 
 
@@ -62,6 +63,12 @@ def cycle(loader):
     while True:
         for batch in loader:
             yield batch
+
+
+def load_base_model(name_or_path, device):
+    return AutoModelForCausalLM.from_pretrained(
+        name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+    ).to(device)
 
 
 def evaluate_greedy(model, tokenizer, val_loader, reward_functions, reward_weights, device, max_new_tokens):
@@ -118,20 +125,30 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
-    ).to(device)
-
     is_peft = args.adaptation == "lora"
-    if is_peft:
-        lora_config = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            target_modules=args.lora_target_modules.split(","),
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
+    start_step = 1
+
+    if args.resume_from:
+        if is_peft:
+            model = PeftModel.from_pretrained(
+                load_base_model(args.model_name, device), args.resume_from, is_trainable=True
+            )
+        else:
+            model = load_base_model(args.resume_from, device)
+        with open(os.path.join(args.resume_from, "trainer_state.json")) as f:
+            start_step = json.load(f)["step"] + 1
+        logger.info("Resuming from %s at step %d", args.resume_from, start_step)
+    else:
+        model = load_base_model(args.model_name, device)
+        if is_peft:
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=args.lora_target_modules.split(","),
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, lora_config)
+            model.print_trainable_parameters()
 
     if args.grad_checkpointing:
         model.gradient_checkpointing_enable()
@@ -165,10 +182,12 @@ def main():
         is_peft=is_peft,
     )
     trainer = GRPOTrainer(model, tokenizer, config)
+    if args.resume_from:
+        trainer.load_optimizer_state(args.resume_from)
 
     logger.info("Starting training: %d steps, group_size=%d, prompts_per_step=%d",
                 args.num_steps, args.group_size, args.prompts_per_step)
-    for step in range(1, args.num_steps + 1):
+    for step in range(start_step, args.num_steps + 1):
         batch = next(train_iter)
         metrics = trainer.train_step(batch)
         metrics["step"] = step
@@ -186,11 +205,11 @@ def main():
 
         if step % args.save_every == 0:
             ckpt_path = os.path.join(run_dir, f"step_{step}")
-            trainer.save(ckpt_path)
+            trainer.save(ckpt_path, step=step)
             logger.info("Checkpoint saved at %s", ckpt_path)
 
     final_path = os.path.join(run_dir, "final")
-    trainer.save(final_path)
+    trainer.save(final_path, step=args.num_steps)
     logger.info("Training complete. Final checkpoint saved at %s", final_path)
 
 

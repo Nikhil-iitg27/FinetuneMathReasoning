@@ -1,5 +1,4 @@
 import argparse
-import os
 
 import torch
 from peft import PeftModel
@@ -25,16 +24,15 @@ def load_model_and_tokenizer(model_name, checkpoint_dir, adaptation, device):
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
-    ).to(device)
-
     if adaptation == "lora":
-        model = PeftModel.from_pretrained(model, checkpoint_dir)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
+        ).to(device)
+        model = PeftModel.from_pretrained(base_model, checkpoint_dir)
     else:
-        state_dict_path = os.path.join(checkpoint_dir, "model.pt")
-        if os.path.exists(state_dict_path):
-            model.load_state_dict(torch.load(state_dict_path, map_location=device))
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_dir, torch_dtype=torch.bfloat16, trust_remote_code=True
+        ).to(device)
     model.eval()
     return model, tokenizer
 
