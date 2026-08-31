@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 
 import torch
@@ -31,7 +32,9 @@ def parse_args():
     p.add_argument("--overlong_cache", type=int, default=64)
     p.add_argument("--overlong_penalty_scale", type=float, default=1.0)
     p.add_argument("--outlier_clip", type=float, default=100.0)
-    p.add_argument("--kl_coef", type=float, default=0.0)
+    p.add_argument("--kl_target", type=float, default=0.0)
+    p.add_argument("--kl_midpoint", type=float, default=45.0)
+    p.add_argument("--kl_steepness", type=float, default=0.15)
     p.add_argument("--group_size", type=int, default=8)
     p.add_argument("--prompts_per_step", type=int, default=4)
     p.add_argument("--num_steps", type=int, default=75)
@@ -68,6 +71,16 @@ def cycle(loader):
     while True:
         for batch in loader:
             yield batch
+
+
+def kl_coef_schedule(step, target, midpoint, steepness):
+    """Sigmoid ramp: near 0 well before `midpoint`, rises steeply around it, saturates
+    near `target` after. Concentrates the KL penalty's onset at the step where drift
+    risk actually starts, rather than penalizing the exploration needed to first
+    discover the output format."""
+    if target == 0.0:
+        return 0.0
+    return target / (1.0 + math.exp(-steepness * (step - midpoint)))
 
 
 def load_base_model(name_or_path, device):
@@ -182,7 +195,7 @@ def main():
         overlong_cache=args.overlong_cache,
         overlong_penalty_scale=args.overlong_penalty_scale,
         outlier_clip=args.outlier_clip,
-        kl_coef=args.kl_coef,
+        kl_coef=args.kl_target,
         group_size=args.group_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
@@ -199,8 +212,10 @@ def main():
                 args.num_steps, args.group_size, args.prompts_per_step)
     for step in range(start_step, args.num_steps + 1):
         batch = next(train_iter)
+        trainer.config.kl_coef = kl_coef_schedule(step, args.kl_target, args.kl_midpoint, args.kl_steepness)
         metrics = trainer.train_step(batch)
         metrics["step"] = step
+        metrics["kl_coef"] = trainer.config.kl_coef
         log_metrics({**metrics, "type": "train"})
         logger.info("Step %d | %s", step, metrics)
 
