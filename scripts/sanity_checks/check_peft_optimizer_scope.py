@@ -41,7 +41,7 @@ def run():
     enc = tokenizer(["Hello"], return_tensors="pt")
     sequences, prompt_length = trainer.generate_rollouts(enc["input_ids"], enc["attention_mask"])
     advantages = torch.ones(sequences.shape[0])
-    loss, _ = trainer.compute_policy_loss(sequences, prompt_length, advantages)
+    loss, _, _ = trainer.compute_policy_loss(sequences, prompt_length, advantages)
 
     if loss is None:
         failures.append("compute_policy_loss returned None (non-finite) on a trivial smoke input")
@@ -56,6 +56,18 @@ def run():
             )
         elif all(g is not None and torch.all(g == 0) for g in adapter_grads):
             failures.append("all adapter gradients are exactly zero after backward()")
+
+    kl_config = GRPOConfig(group_size=2, max_new_tokens=5, reward_functions=[format_reward],
+                            device="cpu", is_peft=True, kl_coef=0.05)
+    kl_trainer = GRPOTrainer(model, tokenizer, kl_config)
+    kl_sequences, kl_prompt_length = kl_trainer.generate_rollouts(enc["input_ids"], enc["attention_mask"])
+    kl_loss, _, mean_kl = kl_trainer.compute_policy_loss(
+        kl_sequences, kl_prompt_length, torch.ones(kl_sequences.shape[0])
+    )
+    if kl_loss is None:
+        failures.append("compute_policy_loss with kl_coef>0 returned None (non-finite)")
+    if mean_kl < 0:
+        failures.append(f"mean_kl should be >= 0, got {mean_kl}")
 
     if failures:
         print("FAIL: check_peft_optimizer_scope")
