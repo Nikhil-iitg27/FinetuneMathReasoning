@@ -27,6 +27,7 @@ def parse_args():
     p.add_argument("--lora_alpha", type=int, default=32)
     p.add_argument("--lora_target_modules", default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj")
     p.add_argument("--learning_rate", type=float, default=1e-5)
+    p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--group_size", type=int, default=8)
     p.add_argument("--prompts_per_step", type=int, default=4)
     p.add_argument("--num_steps", type=int, default=200)
@@ -173,6 +174,7 @@ def main():
 
     config = GRPOConfig(
         learning_rate=args.learning_rate,
+        max_grad_norm=args.max_grad_norm,
         group_size=args.group_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
