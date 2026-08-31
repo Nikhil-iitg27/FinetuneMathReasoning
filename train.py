@@ -33,8 +33,8 @@ def parse_args():
     p.add_argument("--overlong_penalty_scale", type=float, default=1.0)
     p.add_argument("--outlier_clip", type=float, default=100.0)
     p.add_argument("--kl_target", type=float, default=0.0)
-    p.add_argument("--kl_midpoint", type=float, default=45.0)
-    p.add_argument("--kl_steepness", type=float, default=0.15)
+    p.add_argument("--mitigation_midpoint", type=float, default=55.0)
+    p.add_argument("--mitigation_steepness", type=float, default=0.2)
     p.add_argument("--group_size", type=int, default=8)
     p.add_argument("--prompts_per_step", type=int, default=4)
     p.add_argument("--num_steps", type=int, default=75)
@@ -73,14 +73,32 @@ def cycle(loader):
             yield batch
 
 
+OUTLIER_CLIP_PERMISSIVE = 1e4
+
+
+def activation_schedule(step, midpoint, steepness):
+    """Sigmoid, 0->1: near 0 well before `midpoint`, rises steeply around it, saturates
+    near 1 after. Shared by every mitigation below so they all activate together at the
+    step where drift risk actually starts, rather than during the exploration needed to
+    first discover the output format."""
+    return 1.0 / (1.0 + math.exp(-steepness * (step - midpoint)))
+
+
 def kl_coef_schedule(step, target, midpoint, steepness):
-    """Sigmoid ramp: near 0 well before `midpoint`, rises steeply around it, saturates
-    near `target` after. Concentrates the KL penalty's onset at the step where drift
-    risk actually starts, rather than penalizing the exploration needed to first
-    discover the output format."""
     if target == 0.0:
         return 0.0
-    return target / (1.0 + math.exp(-steepness * (step - midpoint)))
+    return target * activation_schedule(step, midpoint, steepness)
+
+
+def length_penalty_schedule(step, target, midpoint, steepness):
+    return target * activation_schedule(step, midpoint, steepness)
+
+
+def outlier_clip_schedule(step, target, midpoint, steepness):
+    """Interpolates from an effectively-unbounded clip (no protection) down to `target`
+    as the activation rises, so early per-sample loss outliers are left untouched."""
+    a = activation_schedule(step, midpoint, steepness)
+    return OUTLIER_CLIP_PERMISSIVE - (OUTLIER_CLIP_PERMISSIVE - target) * a
 
 
 def load_base_model(name_or_path, device):
@@ -212,10 +230,20 @@ def main():
                 args.num_steps, args.group_size, args.prompts_per_step)
     for step in range(start_step, args.num_steps + 1):
         batch = next(train_iter)
-        trainer.config.kl_coef = kl_coef_schedule(step, args.kl_target, args.kl_midpoint, args.kl_steepness)
+        trainer.config.kl_coef = kl_coef_schedule(
+            step, args.kl_target, args.mitigation_midpoint, args.mitigation_steepness
+        )
+        trainer.config.overlong_penalty_scale = length_penalty_schedule(
+            step, args.overlong_penalty_scale, args.mitigation_midpoint, args.mitigation_steepness
+        )
+        trainer.config.outlier_clip = outlier_clip_schedule(
+            step, args.outlier_clip, args.mitigation_midpoint, args.mitigation_steepness
+        )
         metrics = trainer.train_step(batch)
         metrics["step"] = step
         metrics["kl_coef"] = trainer.config.kl_coef
+        metrics["overlong_penalty_scale"] = trainer.config.overlong_penalty_scale
+        metrics["outlier_clip"] = trainer.config.outlier_clip
         log_metrics({**metrics, "type": "train"})
         logger.info("Step %d | %s", step, metrics)
 
