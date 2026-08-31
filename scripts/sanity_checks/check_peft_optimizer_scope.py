@@ -41,7 +41,7 @@ def run():
     enc = tokenizer(["Hello"], return_tensors="pt")
     sequences, prompt_length = trainer.generate_rollouts(enc["input_ids"], enc["attention_mask"])
     advantages = torch.ones(sequences.shape[0])
-    loss = trainer.compute_policy_loss(sequences, prompt_length, advantages)
+    loss, _ = trainer.compute_policy_loss(sequences, prompt_length, advantages)
 
     if loss is None:
         failures.append("compute_policy_loss returned None (non-finite) on a trivial smoke input")

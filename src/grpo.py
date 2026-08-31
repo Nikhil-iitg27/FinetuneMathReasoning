@@ -19,6 +19,7 @@ class GRPOConfig:
     max_grad_norm: float = 1.0
     overlong_cache: int = 64
     overlong_penalty_scale: float = 1.0
+    outlier_clip: Optional[float] = None
     reward_functions: List[Callable] = field(default_factory=list)
     reward_weights: List[float] = field(default_factory=list)
     device: str = "cuda"
@@ -121,33 +122,43 @@ class GRPOTrainer:
         over = (lengths - ramp_start).clamp(min=0, max=cache)
         return -(over / cache) * self.config.overlong_penalty_scale
 
-    def compute_policy_loss(self, sequences, prompt_length, advantages) -> Optional[torch.Tensor]:
+    def _clip_per_sample_loss(self, per_sample_loss):
+        """Caps each sample's raw loss contribution to [-outlier_clip, outlier_clip]
+        before batch-averaging. Returns (clipped_loss, fraction_of_samples_clipped)."""
+        clip = self.config.outlier_clip
+        if clip is None:
+            return per_sample_loss, 0.0
+        clipped_fraction = (per_sample_loss.abs() > clip).float().mean().item()
+        return per_sample_loss.clamp(min=-clip, max=clip), clipped_fraction
+
+    def compute_policy_loss(self, sequences, prompt_length, advantages):
         self.model.train()
         inputs = sequences[:, :-1]
         targets = sequences[:, 1:]
         completion_targets, completion_mask = self._completion_mask(targets, prompt_length)
 
-        # The backbone attends over the full sequence (needed for causal attention), but
-        # the vocab-head projection only needs completion-region log-probs.
         logits_to_keep = completion_targets.shape[1]
         logits = self.model(input_ids=inputs, logits_to_keep=logits_to_keep).logits
         if not torch.isfinite(logits).all():
-            return None
+            return None, 0.0
         log_probs = torch.log_softmax(logits, dim=-1)
         token_log_probs = log_probs.gather(2, completion_targets.unsqueeze(-1)).squeeze(-1)
 
-        # Sum over completion tokens only (no /|o_i| length normalization — Dr. GRPO).
         per_sample_log_prob = (token_log_probs * completion_mask).sum(dim=1)
-        loss = -(advantages.detach() * per_sample_log_prob).mean()
-        return loss if torch.isfinite(loss) else None
+        per_sample_loss = -(advantages.detach() * per_sample_log_prob)
+        per_sample_loss, outlier_clip_fraction = self._clip_per_sample_loss(per_sample_loss)
+
+        loss = per_sample_loss.mean()
+        return (loss if torch.isfinite(loss) else None), outlier_clip_fraction
 
     def _metrics(self, loss_value, rewards, reward_breakdown, extraction_failed,
-                 zero_variance_fraction, sequences, prompt_length, length_penalty):
+                 zero_variance_fraction, sequences, prompt_length, length_penalty, outlier_clip_fraction):
         completion_lengths = self._completion_lengths(sequences, prompt_length).float()
         metrics = {
             "loss": loss_value,
             "mean_reward": rewards.mean().item(),
             "mean_length_penalty": length_penalty.mean().item(),
+            "outlier_clip_fraction": outlier_clip_fraction,
             "extraction_failure_rate": extraction_failed.float().mean().item(),
             "zero_variance_fraction": zero_variance_fraction,
             "mean_completion_length": completion_lengths.mean().item(),
@@ -174,12 +185,12 @@ class GRPOTrainer:
         length_penalty = self.compute_length_penalty(sequences, prompt_length)
         rewards = rewards + length_penalty.to(self.config.device)
         advantages, zero_variance_fraction = self.compute_advantages(rewards)
-        loss = self.compute_policy_loss(sequences, prompt_length, advantages)
+        loss, outlier_clip_fraction = self.compute_policy_loss(sequences, prompt_length, advantages)
 
         if loss is None:
             logging.warning("Skipping optimizer step: non-finite loss/logits detected this step.")
             return self._metrics(None, rewards, reward_breakdown, extraction_failed,
-                                  zero_variance_fraction, sequences, prompt_length, length_penalty)
+                                  zero_variance_fraction, sequences, prompt_length, length_penalty, outlier_clip_fraction)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -189,7 +200,7 @@ class GRPOTrainer:
         self.optimizer.step()
 
         return self._metrics(loss.item(), rewards, reward_breakdown, extraction_failed,
-                              zero_variance_fraction, sequences, prompt_length, length_penalty)
+                              zero_variance_fraction, sequences, prompt_length, length_penalty, outlier_clip_fraction)
 
     def save(self, path: str, step: int = None):
         """Saves a complete, independently loadable checkpoint: safetensors weights
