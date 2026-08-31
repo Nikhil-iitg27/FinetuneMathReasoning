@@ -17,6 +17,8 @@ class GRPOConfig:
     max_new_tokens: int = 256
     temperature: float = 0.8
     max_grad_norm: float = 1.0
+    overlong_cache: int = 64
+    overlong_penalty_scale: float = 1.0
     reward_functions: List[Callable] = field(default_factory=list)
     reward_weights: List[float] = field(default_factory=list)
     device: str = "cuda"
@@ -110,6 +112,15 @@ class GRPOTrainer:
         completion_ids = sequences[:, prompt_length:]
         return self._first_eos_positions(completion_ids) + 1
 
+    def compute_length_penalty(self, sequences, prompt_length):
+        """Soft overlong punishment: zero below `max_new_tokens - overlong_cache`,
+        ramping linearly to `-overlong_penalty_scale` at `max_new_tokens`."""
+        lengths = self._completion_lengths(sequences, prompt_length).float()
+        cache = self.config.overlong_cache
+        ramp_start = self.config.max_new_tokens - cache
+        over = (lengths - ramp_start).clamp(min=0, max=cache)
+        return -(over / cache) * self.config.overlong_penalty_scale
+
     def compute_policy_loss(self, sequences, prompt_length, advantages) -> Optional[torch.Tensor]:
         self.model.train()
         inputs = sequences[:, :-1]
@@ -131,11 +142,12 @@ class GRPOTrainer:
         return loss if torch.isfinite(loss) else None
 
     def _metrics(self, loss_value, rewards, reward_breakdown, extraction_failed,
-                 zero_variance_fraction, sequences, prompt_length):
+                 zero_variance_fraction, sequences, prompt_length, length_penalty):
         completion_lengths = self._completion_lengths(sequences, prompt_length).float()
         metrics = {
             "loss": loss_value,
             "mean_reward": rewards.mean().item(),
+            "mean_length_penalty": length_penalty.mean().item(),
             "extraction_failure_rate": extraction_failed.float().mean().item(),
             "zero_variance_fraction": zero_variance_fraction,
             "mean_completion_length": completion_lengths.mean().item(),
@@ -159,13 +171,15 @@ class GRPOTrainer:
         repeated_ground_truths = [gt for gt in ground_truths for _ in range(group_size)]
 
         rewards, reward_breakdown, extraction_failed = self.compute_rewards(completions, repeated_ground_truths)
+        length_penalty = self.compute_length_penalty(sequences, prompt_length)
+        rewards = rewards + length_penalty.to(self.config.device)
         advantages, zero_variance_fraction = self.compute_advantages(rewards)
         loss = self.compute_policy_loss(sequences, prompt_length, advantages)
 
         if loss is None:
             logging.warning("Skipping optimizer step: non-finite loss/logits detected this step.")
             return self._metrics(None, rewards, reward_breakdown, extraction_failed,
-                                  zero_variance_fraction, sequences, prompt_length)
+                                  zero_variance_fraction, sequences, prompt_length, length_penalty)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -175,7 +189,7 @@ class GRPOTrainer:
         self.optimizer.step()
 
         return self._metrics(loss.item(), rewards, reward_breakdown, extraction_failed,
-                              zero_variance_fraction, sequences, prompt_length)
+                              zero_variance_fraction, sequences, prompt_length, length_penalty)
 
     def save(self, path: str, step: int = None):
         """Saves a complete, independently loadable checkpoint: safetensors weights

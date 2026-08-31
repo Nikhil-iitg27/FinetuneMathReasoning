@@ -4,6 +4,7 @@ import sys
 CHECKS = [
     "check_reward_extraction",
     "check_mask_boundary",
+    "check_length_penalty",
     "check_padding_side_and_pad_token",
     "check_group_alignment",
     "check_sampling_not_greedy",

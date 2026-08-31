@@ -28,18 +28,20 @@ def parse_args():
     p.add_argument("--lora_target_modules", default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj")
     p.add_argument("--learning_rate", type=float, default=1e-5)
     p.add_argument("--max_grad_norm", type=float, default=1.0)
+    p.add_argument("--overlong_cache", type=int, default=64)
+    p.add_argument("--overlong_penalty_scale", type=float, default=1.0)
     p.add_argument("--group_size", type=int, default=8)
     p.add_argument("--prompts_per_step", type=int, default=4)
-    p.add_argument("--num_steps", type=int, default=200)
+    p.add_argument("--num_steps", type=int, default=75)
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--train_subsample_size", type=int, default=1500)
     p.add_argument("--val_size", type=int, default=200)
-    p.add_argument("--val_every", type=int, default=50)
+    p.add_argument("--val_every", type=int, default=25)
     p.add_argument("--checkpoint_dir", default="checkpoints")
     p.add_argument("--log_dir", default="logs")
-    p.add_argument("--save_every", type=int, default=50)
+    p.add_argument("--save_every", type=int, default=25)
     p.add_argument("--grad_checkpointing", action="store_true")
     p.add_argument("--resume_from", default=None)
     return p.parse_args()
@@ -175,6 +177,8 @@ def main():
     config = GRPOConfig(
         learning_rate=args.learning_rate,
         max_grad_norm=args.max_grad_norm,
+        overlong_cache=args.overlong_cache,
+        overlong_penalty_scale=args.overlong_penalty_scale,
         group_size=args.group_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
