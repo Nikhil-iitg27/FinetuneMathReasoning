@@ -11,6 +11,7 @@ CHECKS = [
     "check_group_alignment",
     "check_sampling_not_greedy",
     "check_peft_optimizer_scope",
+    "check_kl_reference_adapter",
 ]
 
 

@@ -9,6 +9,9 @@ from torch.optim import AdamW
 
 from src.rewards import extract_answer
 
+POLICY_ADAPTER_NAME = "default"
+REFERENCE_ADAPTER_NAME = "reference"
+
 
 @dataclass
 class GRPOConfig:
@@ -21,6 +24,7 @@ class GRPOConfig:
     overlong_penalty_scale: float = 1.0
     outlier_clip: Optional[float] = None
     kl_coef: float = 0.0
+    reference_adapter_name: Optional[str] = None
     reward_functions: List[Callable] = field(default_factory=list)
     reward_weights: List[float] = field(default_factory=list)
     device: str = "cuda"
@@ -34,8 +38,10 @@ class GRPOConfig:
 class GRPOTrainer:
     """Group-relative Dr. GRPO: mean-centered advantage, no length normalization.
     An optional KL penalty against a reference policy can be enabled via
-    `GRPOConfig.kl_coef`; the reference policy is the same model with its adapter
-    disabled, so it requires a PEFT-wrapped model."""
+    `GRPOConfig.kl_coef`. The reference policy is either a second, frozen adapter
+    loaded onto the same base model (`GRPOConfig.reference_adapter_name`) or, when
+    that is unset, the same model with its adapter disabled. Both require a
+    PEFT-wrapped model."""
 
     def __init__(self, model, tokenizer, config: GRPOConfig, optimizer=None):
         assert tokenizer.padding_side == "left", (
@@ -45,7 +51,12 @@ class GRPOTrainer:
         if config.kl_coef > 0 and not config.is_peft:
             raise NotImplementedError(
                 "KL penalty requires a PEFT model: the reference policy is obtained "
-                "via disable_adapter(), which only exists on PEFT-wrapped models."
+                "via a frozen adapter or disable_adapter(), both PEFT-only mechanisms."
+            )
+        if config.reference_adapter_name is not None and not config.is_peft:
+            raise ValueError(
+                "reference_adapter_name requires a PEFT model: it names a second "
+                "adapter loaded onto the same base model."
             )
         self.model = model
         self.tokenizer = tokenizer
@@ -139,6 +150,22 @@ class GRPOTrainer:
         clipped_fraction = (per_sample_loss.abs() > clip).float().mean().item()
         return per_sample_loss.clamp(min=-clip, max=clip), clipped_fraction
 
+    def _reference_logits(self, inputs, logits_to_keep):
+        """Logits under the frozen reference policy, computed with no grad tracking.
+        Swaps to the named reference adapter for this forward pass and restores the
+        previously active adapter afterward when one is configured; otherwise falls
+        back to the adapter-disabled base model."""
+        with torch.no_grad():
+            if self.config.reference_adapter_name is not None:
+                active_adapter = self.model.active_adapter
+                self.model.set_adapter(self.config.reference_adapter_name)
+                try:
+                    return self.model(input_ids=inputs, logits_to_keep=logits_to_keep).logits
+                finally:
+                    self.model.set_adapter(active_adapter)
+            with self.model.disable_adapter():
+                return self.model(input_ids=inputs, logits_to_keep=logits_to_keep).logits
+
     def _kl_penalty(self, policy_log_probs, ref_log_probs, mask):
         """Per-sample KL(policy || reference) estimator (Schulman's k3), summed over
         completion tokens. Always >= 0, exactly 0 where policy and reference agree."""
@@ -165,8 +192,7 @@ class GRPOTrainer:
 
         mean_kl = 0.0
         if self.config.kl_coef > 0:
-            with torch.no_grad(), self.model.disable_adapter():
-                ref_logits = self.model(input_ids=inputs, logits_to_keep=logits_to_keep).logits
+            ref_logits = self._reference_logits(inputs, logits_to_keep)
             if not torch.isfinite(ref_logits).all():
                 return None, outlier_clip_fraction, 0.0
             ref_log_probs = torch.log_softmax(ref_logits, dim=-1)
@@ -241,7 +267,10 @@ class GRPOTrainer:
         exists at all."""
         os.makedirs(path, exist_ok=True)
         if self.config.is_peft:
-            self.model.save_pretrained(path)
+            if self.config.reference_adapter_name is not None:
+                self.model.save_pretrained(path, selected_adapters=[POLICY_ADAPTER_NAME])
+            else:
+                self.model.save_pretrained(path)
         else:
             self.model.save_pretrained(path, safe_serialization=True)
         self.tokenizer.save_pretrained(path)

@@ -1,7 +1,6 @@
 import argparse
 import json
 import logging
-import math
 import os
 
 import torch
@@ -15,7 +14,7 @@ from src.data import (
     load_pooled_gsm8k,
     subsample_indices,
 )
-from src.grpo import GRPOConfig, GRPOTrainer
+from src.grpo import POLICY_ADAPTER_NAME, REFERENCE_ADAPTER_NAME, GRPOConfig, GRPOTrainer
 from src.rewards import accuracy_reward, format_reward
 
 
@@ -31,10 +30,14 @@ def parse_args():
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--overlong_cache", type=int, default=64)
     p.add_argument("--overlong_penalty_scale", type=float, default=1.0)
-    p.add_argument("--outlier_clip", type=float, default=100.0)
-    p.add_argument("--kl_target", type=float, default=0.0)
-    p.add_argument("--mitigation_midpoint", type=float, default=55.0)
-    p.add_argument("--mitigation_steepness", type=float, default=0.2)
+    p.add_argument("--outlier_clip", type=float, default=100.0,
+                    help="Caps each sample's raw loss contribution to this magnitude. "
+                         "A value <= 0 disables clipping entirely.")
+    p.add_argument("--kl_coef", type=float, default=0.0)
+    p.add_argument("--kl_reference_path", default=None,
+                    help="Checkpoint directory whose adapter becomes a frozen KL reference, "
+                         "loaded alongside the trainable policy adapter on the same base "
+                         "model. Requires --adaptation lora and --kl_coef > 0.")
     p.add_argument("--group_size", type=int, default=8)
     p.add_argument("--prompts_per_step", type=int, default=4)
     p.add_argument("--num_steps", type=int, default=75)
@@ -73,38 +76,18 @@ def cycle(loader):
             yield batch
 
 
-OUTLIER_CLIP_PERMISSIVE = 1e4
-
-
-def activation_schedule(step, midpoint, steepness):
-    """Sigmoid, 0->1: near 0 well before `midpoint`, rises steeply around it, saturates
-    near 1 after. Shared by every mitigation below so they all activate together at the
-    step where drift risk actually starts, rather than during the exploration needed to
-    first discover the output format."""
-    return 1.0 / (1.0 + math.exp(-steepness * (step - midpoint)))
-
-
-def kl_coef_schedule(step, target, midpoint, steepness):
-    if target == 0.0:
-        return 0.0
-    return target * activation_schedule(step, midpoint, steepness)
-
-
-def length_penalty_schedule(step, target, midpoint, steepness):
-    return target * activation_schedule(step, midpoint, steepness)
-
-
-def outlier_clip_schedule(step, target, midpoint, steepness):
-    """Interpolates from an effectively-unbounded clip (no protection) down to `target`
-    as the activation rises, so early per-sample loss outliers are left untouched."""
-    a = activation_schedule(step, midpoint, steepness)
-    return OUTLIER_CLIP_PERMISSIVE - (OUTLIER_CLIP_PERMISSIVE - target) * a
-
-
 def load_base_model(name_or_path, device):
     return AutoModelForCausalLM.from_pretrained(
         name_or_path, torch_dtype=torch.bfloat16, trust_remote_code=True
     ).to(device)
+
+
+def freeze_adapter(model, adapter_name):
+    """Excludes one named PEFT adapter's parameters from gradient tracking, so it
+    plays no part in the optimizer's trainable set regardless of load order."""
+    for name, param in model.named_parameters():
+        if adapter_name in name.split("."):
+            param.requires_grad_(False)
 
 
 def evaluate_greedy(model, tokenizer, val_loader, reward_functions, reward_weights, device, max_new_tokens):
@@ -162,6 +145,8 @@ def main():
     tokenizer.padding_side = "left"
 
     is_peft = args.adaptation == "lora"
+    if args.kl_reference_path and not is_peft:
+        raise ValueError("--kl_reference_path requires --adaptation lora.")
     start_step = 1
 
     if args.resume_from:
@@ -185,6 +170,13 @@ def main():
             )
             model = get_peft_model(model, lora_config)
             model.print_trainable_parameters()
+
+    if args.kl_reference_path:
+        model.load_adapter(args.kl_reference_path, adapter_name=REFERENCE_ADAPTER_NAME, is_trainable=False)
+        freeze_adapter(model, REFERENCE_ADAPTER_NAME)
+        model.set_adapter(POLICY_ADAPTER_NAME)
+        logger.info("Loaded frozen KL reference adapter from %s", args.kl_reference_path)
+        model.print_trainable_parameters()
 
     if args.grad_checkpointing:
         model.gradient_checkpointing_enable()
@@ -212,8 +204,9 @@ def main():
         max_grad_norm=args.max_grad_norm,
         overlong_cache=args.overlong_cache,
         overlong_penalty_scale=args.overlong_penalty_scale,
-        outlier_clip=args.outlier_clip,
-        kl_coef=args.kl_target,
+        outlier_clip=(args.outlier_clip if args.outlier_clip > 0 else None),
+        kl_coef=args.kl_coef,
+        reference_adapter_name=(REFERENCE_ADAPTER_NAME if args.kl_reference_path else None),
         group_size=args.group_size,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
@@ -230,20 +223,8 @@ def main():
                 args.num_steps, args.group_size, args.prompts_per_step)
     for step in range(start_step, args.num_steps + 1):
         batch = next(train_iter)
-        trainer.config.kl_coef = kl_coef_schedule(
-            step, args.kl_target, args.mitigation_midpoint, args.mitigation_steepness
-        )
-        trainer.config.overlong_penalty_scale = length_penalty_schedule(
-            step, args.overlong_penalty_scale, args.mitigation_midpoint, args.mitigation_steepness
-        )
-        trainer.config.outlier_clip = outlier_clip_schedule(
-            step, args.outlier_clip, args.mitigation_midpoint, args.mitigation_steepness
-        )
         metrics = trainer.train_step(batch)
         metrics["step"] = step
-        metrics["kl_coef"] = trainer.config.kl_coef
-        metrics["overlong_penalty_scale"] = trainer.config.overlong_penalty_scale
-        metrics["outlier_clip"] = trainer.config.outlier_clip
         log_metrics({**metrics, "type": "train"})
         logger.info("Step %d | %s", step, metrics)
 
