@@ -1,0 +1,7 @@
+{
+  "num_examples": 880,
+  "test_accuracy": 0.6670454545454545,
+  "test_format_rate": 0.9829545454545454,
+  "run_name": "run_b",
+  "checkpoint_dir": "checkpoints/run_b/final"
+}

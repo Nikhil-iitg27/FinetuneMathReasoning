@@ -1,0 +1,8 @@
+run,step,val_accuracy,val_format_rate
+run_a_noclip,25,0.445,0.975
+run_a_noclip,50,0.435,0.985
+run_a_noclip,75,0.475,0.985
+run_b,25,0.72,0.94
+run_b,50,0.665,0.995
+run_b,75,0.665,0.995
+run_b,100,0.685,0.965

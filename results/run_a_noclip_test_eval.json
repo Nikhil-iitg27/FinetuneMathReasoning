@@ -1,0 +1,7 @@
+{
+  "num_examples": 880,
+  "test_accuracy": 0.41363636363636364,
+  "test_format_rate": 0.9897727272727272,
+  "run_name": "run_a_noclip",
+  "checkpoint_dir": "checkpoints/run_a_noclip/step_75"
+}

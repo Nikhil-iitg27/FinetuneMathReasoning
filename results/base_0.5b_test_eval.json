@@ -1,0 +1,7 @@
+{
+  "num_examples": 880,
+  "test_accuracy": 0.0011363636363636363,
+  "test_format_rate": 0.0011363636363636363,
+  "run_name": "base_0.5b",
+  "checkpoint_dir": "Qwen/Qwen2.5-0.5B-Instruct"
+}
